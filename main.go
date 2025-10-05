@@ -315,10 +315,11 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// ✅ ส่ง URL กลับไปให้ Angular
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(fmt.Sprintf(`{"path": "%s"}`, uploadResult.SecureURL)))
+	json.NewEncoder(w).Encode(map[string]string{
+    	"path": uploadResult.SecureURL, // ✅ URL รูปจาก Cloudinary
+	})
 }
 
-// ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
 // ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
