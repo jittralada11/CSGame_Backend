@@ -159,9 +159,10 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
-		Image    string `json:"image"` // base64 หรือ URL ที่ส่งมา
+		Image    string `json:"image"` // ✅ URL ที่ส่งมาจาก Angular
 		Role     string `json:"role"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -186,23 +187,10 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ อัปโหลดรูปภาพขึ้น Cloudinary (ถ้ามี)
-	imageURL := ""
-	if u.Image != "" {
-		cld, _ := cloudinary.NewFromParams("dvgxxafbb", "146741477549332", "so_4ajw-nCCtJekaC7VAUAqySX4")
-		ctx := context.Background()
+	// ✅ ใช้ URL ที่ Angular ส่งมาเลย (ไม่อัปโหลดซ้ำ)
+	imageURL := u.Image
 
-		uploadResult, err := cld.Upload.Upload(ctx, u.Image, uploader.UploadParams{
-			Folder: "users", // สร้างโฟลเดอร์ชื่อ users
-		})
-		if err != nil {
-			http.Error(w, "Failed to upload image", http.StatusInternalServerError)
-			return
-		}
-		imageURL = uploadResult.SecureURL
-	}
-
-	// INSERT
+	// INSERT ข้อมูลลงฐานข้อมูล
 	stmt, err := db.Prepare("INSERT INTO user (username, email, password, image, role, created_at) VALUES (?, ?, ?, ?, ?, NOW())")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -218,7 +206,7 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 
 	lastID, _ := res.LastInsertId()
 
-	// ✅ ตอบกลับ
+	// ✅ ส่งข้อมูลกลับไปที่ frontend
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message":   "User registered successfully",
@@ -230,6 +218,7 @@ func registerUser(w http.ResponseWriter, r *http.Request) {
 		"createdAt": time.Now().Format("2006-01-02 15:04:05"),
 	})
 }
+
 
 
 // handler สำหรับ login
