@@ -1,0 +1,396 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os/exec"
+	"runtime"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/crypto/bcrypt"
+	"github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
+)
+
+// กำหนดโครงสร้างข้อมูล user (ตรงกับ table user)
+type User struct {
+	UID      int    `json:"uid"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Image    string `json:"image"`
+	Role     string `json:"role"`
+	Created  string `json:"created_at"`
+}
+
+var db *sql.DB
+
+func main() {
+	// Connection string
+	dsn := "66011212012:JittraladaDB2012@tcp(202.28.34.210:3309)/db66011212012"
+
+	var err error
+	db, err = sql.Open("mysql", dsn)
+	if err != nil {
+		log.Fatal("Cannot connect to database:", err)
+	}
+	defer db.Close()
+
+	if err = db.Ping(); err != nil {
+		log.Fatal("Cannot ping database:", err)
+	}
+	fmt.Println("✅ Connected to database successfully")
+
+	// Router
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", getUsers)
+	mux.HandleFunc("/register", registerUser)
+	mux.HandleFunc("/login", loginUser)
+	mux.HandleFunc("/upload", uploadHandler)
+	mux.HandleFunc("/update-profile", updateUser)
+
+
+	// ✅ Serve static files (รูป)
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
+
+	// ✅ เปิด CORS ให้ Angular เรียกได้
+	handler := enableCORS(mux)
+
+	// หา IP ของเครื่อง
+	ip := getLocalIP()
+	url := fmt.Sprintf("http://%s:8080", ip)
+
+	// เปิด browser อัตโนมัติ
+	openBrowser(url)
+
+	// run server
+	fmt.Printf("🚀 Server started at %s\n", url)
+	log.Fatal(http.ListenAndServe("0.0.0.0:8080", handler))
+}
+
+// ✅ ฟังก์ชันเปิด CORS
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handler ดึงข้อมูล user ทั้งหมด
+func getUsers(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT uid, username, email, IFNULL(image, ''), role, created_at FROM user")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.UID, &u.Username, &u.Email, &u.Image, &u.Role, &u.Created); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		users = append(users, u)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+
+// หา IPv4 LAN จริง
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "localhost"
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ip := ipnet.IP.To4(); ip != nil {
+				if ip[0] == 192 || ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) {
+					return ip.String()
+				}
+			}
+		}
+	}
+	return "localhost"
+}
+
+// เปิด browser อัตโนมัติ
+func openBrowser(url string) {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "rundll32"
+		args = []string{"url.dll,FileProtocolHandler", url}
+	case "darwin": // MacOS
+		cmd = "open"
+		args = []string{url}
+	default: // Linux
+		cmd = "xdg-open"
+		args = []string{url}
+	}
+
+	exec.Command(cmd, args...).Start()
+}
+
+// handler ลงทะเบียนผู้ใช้ใหม่
+func registerUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var u struct {
+		Username string `json:"username"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Image    string `json:"image"` // base64 หรือ URL ที่ส่งมา
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// ตรวจสอบ email ซ้ำ
+	var exists int
+	err := db.QueryRow("SELECT COUNT(*) FROM user WHERE email = ?", u.Email).Scan(&exists)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if exists > 0 {
+		http.Error(w, "Email already exists", http.StatusBadRequest)
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ อัปโหลดรูปภาพขึ้น Cloudinary (ถ้ามี)
+	imageURL := ""
+	if u.Image != "" {
+		cld, _ := cloudinary.NewFromParams("dvgxxafbb", "146741477549332", "so_4ajw-nCCtJekaC7VAUAqySX4")
+		ctx := context.Background()
+
+		uploadResult, err := cld.Upload.Upload(ctx, u.Image, uploader.UploadParams{
+			Folder: "users", // สร้างโฟลเดอร์ชื่อ users
+		})
+		if err != nil {
+			http.Error(w, "Failed to upload image", http.StatusInternalServerError)
+			return
+		}
+		imageURL = uploadResult.SecureURL
+	}
+
+	// INSERT
+	stmt, err := db.Prepare("INSERT INTO user (username, email, password, image, role, created_at) VALUES (?, ?, ?, ?, ?, NOW())")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stmt.Close()
+
+	res, err := stmt.Exec(u.Username, u.Email, string(hashedPassword), imageURL, u.Role)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	lastID, _ := res.LastInsertId()
+
+	// ✅ ตอบกลับ
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":   "User registered successfully",
+		"uid":       lastID,
+		"username":  u.Username,
+		"email":     u.Email,
+		"role":      u.Role,
+		"image":     imageURL,
+		"createdAt": time.Now().Format("2006-01-02 15:04:05"),
+	})
+}
+
+
+// handler สำหรับ login
+func loginUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var hashedPassword, username, role, image, createdAt string
+	var uid int
+
+	// ✅ ดึง image และ created_at มาด้วย
+	err := db.QueryRow("SELECT uid, username, password, role, IFNULL(image,''), created_at FROM user WHERE email = ?",
+		input.Email).Scan(&uid, &username, &hashedPassword, &role, &image, &createdAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Email not found", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ตรวจสอบ password
+	err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(input.Password))
+	if err != nil {
+		http.Error(w, "Incorrect password", http.StatusUnauthorized)
+		return
+	}
+
+	// ✅ ตอบกลับ JSON ครบทุกฟิลด์
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":   "Login successful",
+		"uid":       uid,
+		"username":  username,
+		"email":     input.Email,
+		"role":      role,
+		"image":     image,
+		"createdAt": createdAt,
+	})
+}
+
+
+// handler สำหรับอัปโหลดไฟล์
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	// อนุญาตเฉพาะ POST
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// อ่านไฟล์จากฟอร์ม
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "ไม่พบไฟล์ในคำขอ", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// ✅ สร้าง Cloudinary instance
+	cld, err := cloudinary.NewFromParams(
+		"dvgxxafbb", // 👉 แทนด้วยชื่อ cloud ของคุณ
+		"146741477549332",    // 👉 api key จาก dashboard
+		"so_4ajw-nCCtJekaC7VAUAqySX4", // 👉 api secret จาก dashboard
+	) 		
+
+	if err != nil {
+		http.Error(w, "Cloudinary init error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ อัปโหลดไฟล์ขึ้น Cloudinary
+	ctx := context.Background()
+	uploadResult, err := cld.Upload.Upload(ctx, file, uploader.UploadParams{
+		Folder: "users", // สร้างโฟลเดอร์ใน Cloudinary ชื่อ users
+		PublicID: header.Filename,
+	})
+	if err != nil {
+		http.Error(w, "Upload error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ส่ง URL กลับไปให้ Angular
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(fmt.Sprintf(`{"path": "%s"}`, uploadResult.SecureURL)))
+}
+
+// ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
+// ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
+func updateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var u struct {
+		UID          int    `json:"uid"`
+		Username     string `json:"username"`
+		Email        string `json:"email"`
+		ProfileImage string `json:"profileImage"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// ✅ อัปเดตข้อมูลในฐานข้อมูล
+	stmt, err := db.Prepare("UPDATE user SET username=?, email=?, image=? WHERE uid=?")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(u.Username, u.Email, u.ProfileImage, u.UID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ดึงข้อมูลล่าสุดกลับมา
+	var updatedUser User
+	err = db.QueryRow(`
+		SELECT uid, username, email, IFNULL(image,''), role, created_at
+		FROM user
+		WHERE uid = ?`, u.UID).Scan(
+		&updatedUser.UID,
+		&updatedUser.Username,
+		&updatedUser.Email,
+		&updatedUser.Image,
+		&updatedUser.Role,
+		&updatedUser.Created,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ส่งข้อมูลใหม่กลับให้ Angular
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"uid":        updatedUser.UID,
+		"username":   updatedUser.Username,
+		"email":      updatedUser.Email,
+		"profileImage":      updatedUser.Image,  // ✅ รูปใหม่จะกลับมาพร้อม
+		"role":       updatedUser.Role,
+		"createdAt":  updatedUser.Created, // ✅ วันที่กลับมาแล้ว
+	})
+}
+
+
