@@ -321,35 +321,48 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
+// ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// ✅ รองรับทั้ง profileImage และ image จาก Angular
 	var u struct {
 		UID          int    `json:"uid"`
 		Username     string `json:"username"`
 		Email        string `json:"email"`
 		ProfileImage string `json:"profileImage"`
+		Image        string `json:"image"`
 	}
 
+	// ✅ แปลง JSON ที่รับมาจาก Angular
 	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// ✅ อัปเดตข้อมูลในฐานข้อมูล
+	// ✅ กำหนดรูปที่จะอัปเดต (ถ้า profileImage ว่างแต่ image มี → ใช้ image)
+	imageToUpdate := u.ProfileImage
+	if imageToUpdate == "" && u.Image != "" {
+		imageToUpdate = u.Image
+	}
+
+	// ✅ Debug log ฝั่ง backend (ดูได้จาก terminal)
+	fmt.Printf("📩 อัปเดตผู้ใช้ UID=%d | image=%s\n", u.UID, imageToUpdate)
+
+	// ✅ อัปเดตในฐานข้อมูล
 	stmt, err := db.Prepare("UPDATE user SET username=?, email=?, image=? WHERE uid=?")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database prepare error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec(u.Username, u.Email, u.ProfileImage, u.UID)
+	_, err = stmt.Exec(u.Username, u.Email, imageToUpdate, u.UID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database exec error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -367,20 +380,21 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		&updatedUser.Created,
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// ✅ ส่งข้อมูลใหม่กลับให้ Angular
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"uid":        updatedUser.UID,
-		"username":   updatedUser.Username,
-		"email":      updatedUser.Email,
-		"profileImage":      updatedUser.Image,  // ✅ รูปใหม่จะกลับมาพร้อม
-		"role":       updatedUser.Role,
-		"createdAt":  updatedUser.Created, // ✅ วันที่กลับมาแล้ว
+		"uid":          updatedUser.UID,
+		"username":     updatedUser.Username,
+		"email":        updatedUser.Email,
+		"profileImage": updatedUser.Image, // คืนชื่อฟิลด์แบบเดียวกับ Angular
+		"role":         updatedUser.Role,
+		"createdAt":    updatedUser.Created,
 	})
 }
+
 
 
