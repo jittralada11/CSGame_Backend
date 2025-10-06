@@ -321,7 +321,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
-// ✅ handler สำหรับอัปเดตข้อมูลผู้ใช้
+
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
