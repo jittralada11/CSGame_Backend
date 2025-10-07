@@ -48,6 +48,9 @@ func main() {
 
 	// Router
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    	fmt.Fprintln(w, "CSShop Backend is running successfully! ")
+	})
 	mux.HandleFunc("/user", getUsers)
 	mux.HandleFunc("/register", registerUser)
 	mux.HandleFunc("/login", loginUser)
