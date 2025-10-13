@@ -105,13 +105,14 @@ func main() {
 	mux.HandleFunc("/users-with-wallet", getUsersWithWallet)
 
 	// Game Routes
+	mux.HandleFunc("/user/games", getUserGames)
+	mux.HandleFunc("/upload/game", uploadGameImage)
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
 	mux.HandleFunc("/game-types", getGameTypes) // ดึงประเภทเกมทั้งหมด
 	mux.HandleFunc("/game/", getGameByID)       // ดึงเกมตาม id
 	mux.HandleFunc("/game/add", addGame)        // เพิ่มเกมใหม่
 	mux.HandleFunc("/game/update", updateGame)  // แก้ไขข้อมูลเกม
 	mux.HandleFunc("/game/delete/", deleteGame) // ลบเกม
-	mux.HandleFunc("/user/games", getUserGames)
 	mux.HandleFunc("/games/top-sales", getTopSellingGames)
 
 	// ✅ Serve static files (รูป)
@@ -373,6 +374,46 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"path": uploadResult.SecureURL, // ✅ URL รูปจาก Cloudinary
+	})
+}
+
+// ✅ Handler สำหรับอัปโหลดรูปเกมขึ้น Cloudinary
+func uploadGameImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "ไม่พบไฟล์ในคำขอ", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	cld, err := cloudinary.NewFromParams(
+		"dvgxxafbb",                   // Cloud name ของคุณ
+		"146741477549332",             // API Key
+		"so_4ajw-nCCtJekaC7VAUAqySX4", // API Secret
+	)
+	if err != nil {
+		http.Error(w, "Cloudinary init error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ctx := context.Background()
+	uploadResult, err := cld.Upload.Upload(ctx, file, uploader.UploadParams{
+		Folder:   "games", // 📂 เก็บไว้ในโฟลเดอร์ games
+		PublicID: header.Filename,
+	})
+	if err != nil {
+		http.Error(w, "Upload error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"path": uploadResult.SecureURL, // ✅ ส่ง URL กลับไปให้ Angular
 	})
 }
 
