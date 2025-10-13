@@ -60,13 +60,13 @@ type WalletTransaction struct {
 }
 
 type UserWithWallet struct {
-	UID       int     `json:"uid"`
-	Username  string  `json:"username"`
-	Email     string  `json:"email"`
-	Image     string  `json:"image"`
-	Role      string  `json:"role"`
-	CreatedAt string  `json:"created_at"`
-	Balance   float64 `json:"balance"`
+	UID           int     `json:"uid"`
+	Username      string  `json:"username"`
+	Email         string  `json:"email"`
+	Image         string  `json:"image"`
+	Role          string  `json:"role"`
+	CreatedAt     string  `json:"created_at"`
+	WalletBalance float64 `json:"walletBalance"`
 }
 
 var db *sql.DB
@@ -990,10 +990,19 @@ func getUsersWithWallet(w http.ResponseWriter, r *http.Request) {
 	var users []UserWithWallet
 	for rows.Next() {
 		var u UserWithWallet
-		if err := rows.Scan(&u.UID, &u.Username, &u.Email, &u.Image, &u.Role, &u.CreatedAt, &u.Balance); err != nil {
+		if err := rows.Scan(
+			&u.UID,
+			&u.Username,
+			&u.Email,
+			&u.Image,
+			&u.Role,
+			&u.CreatedAt,
+			&u.WalletBalance, // ✅ เปลี่ยนจาก &u.Balance เป็น &u.WalletBalance
+		); err != nil {
 			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		users = append(users, u)
 	}
 
