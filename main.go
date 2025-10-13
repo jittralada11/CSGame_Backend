@@ -639,61 +639,76 @@ func deleteGame(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Game deleted successfully"})
 }
 
-// ✅ handler เติมเงิน
+// ✅ handler เติมเงินเข้ากระเป๋า (เวอร์ชันปลอดภัย ป้องกัน Race Condition)
 func topUpWallet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// ✅ รับข้อมูลจาก frontend
 	var req struct {
 		UID    int     `json:"uid"`
 		Amount float64 `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
+	// ✅ ตรวจสอบข้อมูลเบื้องต้น
 	if req.Amount <= 0 {
 		http.Error(w, "Invalid top-up amount", http.StatusBadRequest)
 		return
 	}
 
-	tx, err := db.Begin()
+	// ✅ เริ่ม Transaction พร้อม Isolation สูงสุด
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{
+		Isolation: sql.LevelSerializable, // ป้องกันการอ่าน/เขียนพร้อมกัน
+	})
 	if err != nil {
-		http.Error(w, "Transaction error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Transaction start error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบว่าผู้ใช้มี wallet หรือยัง
 	var walletID int
-	err = tx.QueryRow("SELECT wallet_id FROM wallet WHERE uid = ?", req.UID).Scan(&walletID)
+	var balance float64
+	err = tx.QueryRow("SELECT wallet_id, balance FROM wallet WHERE uid = ? FOR UPDATE", req.UID).Scan(&walletID, &balance)
+
 	if err == sql.ErrNoRows {
-		// ถ้ายังไม่มี → สร้างใหม่
+		// ✅ ถ้ายังไม่มี wallet → สร้างใหม่พร้อมยอดเริ่มต้น
 		res, err := tx.Exec("INSERT INTO wallet (uid, balance) VALUES (?, ?)", req.UID, req.Amount)
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "Cannot create wallet: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Create wallet error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		lastID, _ := res.LastInsertId()
 		walletID = int(lastID)
+		balance = req.Amount
 	} else if err != nil {
 		tx.Rollback()
 		http.Error(w, "Query wallet error: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else {
-		// มีอยู่แล้ว → อัปเดตยอด
+		// ✅ ถ้ามีอยู่แล้ว → อัปเดตยอด (พร้อมล็อก row แล้ว)
 		_, err = tx.Exec("UPDATE wallet SET balance = balance + ? WHERE wallet_id = ?", req.Amount, walletID)
 		if err != nil {
 			tx.Rollback()
 			http.Error(w, "Update wallet error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// ดึงยอดล่าสุด (ตรวจสอบหลังอัปเดต)
+		err = tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ? FOR UPDATE", walletID).Scan(&balance)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "Balance check error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	// ✅ บันทึกประวัติใน wallet_transaction
+	// ✅ บันทึกธุรกรรมการเติมเงิน
 	_, err = tx.Exec(`
 		INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description)
 		VALUES (?, ?, 'topup', ?)`,
@@ -704,12 +719,13 @@ func topUpWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx.Commit()
+	// ✅ Commit ทุกขั้นตอนพร้อมกัน
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Commit error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	// ✅ ดึงยอดคงเหลือล่าสุด
-	var balance float64
-	db.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&balance)
-
+	// ✅ ตอบกลับข้อมูลหลังอัปเดตสำเร็จ
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Top-up successful",
@@ -798,52 +814,61 @@ func getWalletBalance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ✅ handler หักเงินเมื่อผู้ใช้ซื้อเกม
+// ✅ handler หักเงินเมื่อผู้ใช้ซื้อเกม (เวอร์ชันป้องกัน Race Condition)
 func purchaseGame(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// ✅ รับข้อมูลจาก frontend
 	var req struct {
 		UID         int     `json:"uid"`
-		GameID      int     `json:"game_id"` // ✅ เพิ่ม game_id เข้ามาจาก frontend
+		GameID      int     `json:"game_id"`
 		Amount      float64 `json:"amount"`
 		Description string  `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
+	// ✅ ตรวจสอบความถูกต้องของข้อมูล
 	if req.Amount <= 0 {
 		http.Error(w, "Invalid purchase amount", http.StatusBadRequest)
 		return
 	}
 
-	tx, err := db.Begin()
+	// ✅ เริ่ม Transaction พร้อม Isolation สูงสุด
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{
+		Isolation: sql.LevelSerializable, // ป้องกันการอ่าน/เขียนซ้อน
+	})
 	if err != nil {
 		http.Error(w, "Transaction start error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้หรือยัง
-	var exists int
-	err = tx.QueryRow("SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ?", req.UID, req.GameID).Scan(&exists)
+	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้แล้วหรือยัง
+	var alreadyOwned int
+	err = tx.QueryRow(
+		"SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ?",
+		req.UID, req.GameID,
+	).Scan(&alreadyOwned)
 	if err != nil {
 		tx.Rollback()
 		http.Error(w, "Check ownership error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if exists > 0 {
+	if alreadyOwned > 0 {
 		tx.Rollback()
 		http.Error(w, "You already own this game", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ ตรวจสอบ wallet และยอดเงิน
+	// ✅ ดึง wallet_id และยอดเงิน พร้อมล็อกแถวไว้ระหว่าง transaction
 	var walletID int
-	err = tx.QueryRow("SELECT wallet_id FROM wallet WHERE uid = ?", req.UID).Scan(&walletID)
+	var balance float64
+	err = tx.QueryRow("SELECT wallet_id, balance FROM wallet WHERE uid = ? FOR UPDATE", req.UID).Scan(&walletID, &balance)
 	if err == sql.ErrNoRows {
 		tx.Rollback()
 		http.Error(w, "Wallet not found", http.StatusNotFound)
@@ -854,8 +879,7 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var balance float64
-	tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&balance)
+	// ✅ ตรวจสอบยอดเงินเพียงพอหรือไม่
 	if balance < req.Amount {
 		tx.Rollback()
 		http.Error(w, "Insufficient balance", http.StatusBadRequest)
@@ -870,7 +894,7 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ เพิ่มข้อมูลในตารางธุรกรรม
+	// ✅ บันทึกธุรกรรมลง wallet_transaction
 	_, err = tx.Exec(`
 		INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description)
 		VALUES (?, ?, 'purchase', ?)`,
@@ -889,17 +913,34 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx.Commit()
-
+	// ✅ ดึงยอดเงินล่าสุดหลังจากอัปเดต (ตรวจสอบ double-spend)
 	var newBalance float64
-	db.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&newBalance)
+	err = tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ? FOR UPDATE", walletID).Scan(&newBalance)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Balance recheck failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if newBalance < 0 {
+		tx.Rollback()
+		http.Error(w, "Concurrent transaction conflict detected", http.StatusConflict)
+		return
+	}
 
+	// ✅ บันทึกการเปลี่ยนแปลงลงฐานข้อมูล
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Commit error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ตอบกลับผลลัพธ์
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Purchase successful",
-		"uid":     req.UID,
-		"game_id": req.GameID,
-		"balance": newBalance,
+		"message":  "Purchase successful",
+		"uid":      req.UID,
+		"game_id":  req.GameID,
+		"balance":  newBalance,
+		"deducted": req.Amount,
 	})
 }
 
