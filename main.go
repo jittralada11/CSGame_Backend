@@ -89,7 +89,9 @@ func main() {
 	mux.HandleFunc("/update-profile", updateUser)
 	mux.HandleFunc("/wallet/topup", topUpWallet)
 	mux.HandleFunc("/wallet/transactions", getWalletTransactions)
-	// game
+	mux.HandleFunc("/wallet/balance", getWalletBalance)
+	mux.HandleFunc("/wallet/purchase", recordPurchase)
+
 	// Game Routes
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
 	mux.HandleFunc("/game/", getGameByID)       // ดึงเกมตาม id
@@ -670,28 +672,46 @@ func topUpWallet(w http.ResponseWriter, r *http.Request) {
 }
 
 // ✅ handler สำหรับแอดมิน ดูประวัติการเติมเงินทั้งหมด
+// ✅ ดึงประวัติการทำรายการทั้งหมดของ user
 func getWalletTransactions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	rows, err := db.Query(`
-		SELECT wt.trans_id, wt.wallet_id, wt.amount, wt.trans_type, wt.description, wt.created_at, u.username
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		http.Error(w, "Missing uid", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT wt.trans_id, wt.amount, wt.trans_type, wt.description, wt.created_at
 		FROM wallet_transaction wt
 		JOIN wallet w ON wt.wallet_id = w.wallet_id
-		JOIN user u ON w.uid = u.uid
-		ORDER BY wt.created_at DESC`)
+		WHERE w.uid = ?
+		ORDER BY wt.created_at DESC;
+	`
+
+	rows, err := db.Query(query, uid)
 	if err != nil {
-		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Database query error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	var transactions []WalletTransaction
+	type Transaction struct {
+		TransID     int     `json:"trans_id"`
+		Amount      float64 `json:"amount"`
+		Type        string  `json:"type"`
+		Description string  `json:"description"`
+		CreatedAt   string  `json:"createdAt"`
+	}
+
+	var transactions []Transaction
 	for rows.Next() {
-		var t WalletTransaction
-		if err := rows.Scan(&t.TransID, &t.WalletID, &t.Amount, &t.TransType, &t.Description, &t.CreatedAt, &t.Username); err != nil {
+		var t Transaction
+		if err := rows.Scan(&t.TransID, &t.Amount, &t.Type, &t.Description, &t.CreatedAt); err != nil {
 			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -700,4 +720,82 @@ func getWalletTransactions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transactions)
+}
+
+// ✅ handler ดึงยอดคงเหลือของกระเป๋าเงิน
+func getWalletBalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		http.Error(w, "Missing uid", http.StatusBadRequest)
+		return
+	}
+
+	var balance float64
+	err := db.QueryRow("SELECT IFNULL(balance, 0) FROM wallet WHERE uid = ?", uid).Scan(&balance)
+	if err == sql.ErrNoRows {
+		balance = 0
+	} else if err != nil {
+		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"uid":     uid,
+		"balance": balance,
+	})
+}
+
+func recordPurchase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		UID         int     `json:"uid"`
+		Amount      float64 `json:"amount"`
+		Description string  `json:"description"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// ตรวจสอบ wallet
+	var walletID int
+	err := db.QueryRow("SELECT wallet_id FROM wallet WHERE uid = ?", req.UID).Scan(&walletID)
+	if err == sql.ErrNoRows {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ตรวจสอบยอดเงินพอไหม
+	var balance float64
+	db.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&balance)
+	if balance < req.Amount {
+		http.Error(w, "Insufficient balance", http.StatusBadRequest)
+		return
+	}
+
+	// หักยอด + บันทึก transaction
+	tx, _ := db.Begin()
+	tx.Exec("UPDATE wallet SET balance = balance - ? WHERE wallet_id = ?", req.Amount, walletID)
+	tx.Exec("INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description) VALUES (?, ?, 'purchase', ?)",
+		walletID, req.Amount, req.Description)
+	tx.Commit()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Purchase recorded successfully",
+		"balance": balance - req.Amount,
+	})
 }
