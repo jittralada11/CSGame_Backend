@@ -873,7 +873,7 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		Description string  `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
@@ -882,21 +882,26 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ เริ่ม Transaction ด้วยระดับ Isolation สูงสุด (Serializable)
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{
-		Isolation: sql.LevelSerializable,
-	})
+	// ✅ เริ่ม transaction เพื่อให้ทุกขั้นตอนเป็น atomic
+	tx, err := db.Begin()
 	if err != nil {
-		http.Error(w, "Transaction start error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Cannot start transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้หรือยัง (ล็อกข้อมูล ownership ด้วย)
+	defer func() {
+		if p := recover(); p != nil {
+			tx.Rollback()
+			http.Error(w, "Transaction panic", http.StatusInternalServerError)
+		}
+	}()
+
+	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้แล้วหรือยัง
 	var exists int
-	err = tx.QueryRow("SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ? FOR UPDATE", req.UID, req.GameID).Scan(&exists)
+	err = tx.QueryRow("SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ?", req.UID, req.GameID).Scan(&exists)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, "Check ownership error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error checking game ownership: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if exists > 0 {
@@ -905,7 +910,7 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ ล็อกข้อมูล wallet เพื่อป้องกันการซื้อพร้อมกัน
+	// ✅ ล็อกแถว wallet (FOR UPDATE) เพื่อป้องกันการแก้ไขพร้อมกัน
 	var walletID int
 	var balance float64
 	err = tx.QueryRow("SELECT wallet_id, balance FROM wallet WHERE uid = ? FOR UPDATE", req.UID).Scan(&walletID, &balance)
@@ -915,45 +920,17 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		tx.Rollback()
-		http.Error(w, "Wallet query error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error fetching wallet: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบยอดเงิน
 	if balance < req.Amount {
 		tx.Rollback()
 		http.Error(w, "Insufficient balance", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ หักเงินออกจากกระเป๋า
-	_, err = tx.Exec("UPDATE wallet SET balance = balance - ? WHERE wallet_id = ?", req.Amount, walletID)
-	if err != nil {
-		tx.Rollback()
-		http.Error(w, "Wallet update error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// ✅ บันทึกธุรกรรม (wallet_transaction)
-	_, err = tx.Exec(`
-		INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description)
-		VALUES (?, ?, 'purchase', ?)`,
-		walletID, req.Amount, req.Description)
-	if err != nil {
-		tx.Rollback()
-		http.Error(w, "Insert transaction error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// ✅ บันทึกการเป็นเจ้าของเกม
-	_, err = tx.Exec("INSERT INTO user_game (uid, game_id) VALUES (?, ?)", req.UID, req.GameID)
-	if err != nil {
-		tx.Rollback()
-		http.Error(w, "Insert user_game error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// ✅ ล็อกข้อมูลเกมก่อนอัปเดตยอดขาย
+	// ✅ ล็อกเกมที่กำลังจะซื้อ เพื่อป้องกันยอดขายซ้ำ (อีกจุดสำคัญ)
 	var currentSales int
 	err = tx.QueryRow("SELECT sales FROM game WHERE game_id = ? FOR UPDATE", req.GameID).Scan(&currentSales)
 	if err == sql.ErrNoRows {
@@ -962,42 +939,61 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		tx.Rollback()
-		http.Error(w, "Query game sales error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error fetching game info: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ เพิ่มยอดขายแบบปลอดภัย
-	newSales := currentSales + 1
-	_, err = tx.Exec("UPDATE game SET sales = ? WHERE game_id = ?", newSales, req.GameID)
+	// ✅ หักเงินออกจาก wallet
+	_, err = tx.Exec("UPDATE wallet SET balance = balance - ? WHERE wallet_id = ?", req.Amount, walletID)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, "Update game sales error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error updating wallet: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ดึงยอดคงเหลือใหม่หลังจากซื้อสำเร็จ
-	var newBalance float64
-	err = tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&newBalance)
+	// ✅ เพิ่ม transaction log
+	_, err = tx.Exec(`
+		INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description)
+		VALUES (?, ?, 'purchase', ?)`,
+		walletID, req.Amount, req.Description)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, "Balance recheck error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error inserting transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ Commit Transaction ทั้งหมด
+	// ✅ บันทึกว่า user ซื้อเกมนี้แล้ว
+	_, err = tx.Exec("INSERT INTO user_game (uid, game_id) VALUES (?, ?)", req.UID, req.GameID)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Error inserting user_game: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ อัปเดตยอดขายเกม (เพิ่ม 1) — อยู่ใน transaction เดียวกัน
+	_, err = tx.Exec("UPDATE game SET sales = sales + 1 WHERE game_id = ?", req.GameID)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Error updating game sales: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ Commit ทุกอย่างพร้อมกัน (atomic operation)
 	if err := tx.Commit(); err != nil {
-		http.Error(w, "Commit error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Commit transaction error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตอบกลับข้อมูล
+	// ✅ ดึงยอดคงเหลือล่าสุดกลับไป
+	var newBalance float64
+	db.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&newBalance)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":   "Purchase successful",
-		"uid":       req.UID,
-		"game_id":   req.GameID,
-		"balance":   newBalance,
-		"new_sales": newSales,
+		"message": "Purchase successful",
+		"uid":     req.UID,
+		"game_id": req.GameID,
+		"balance": newBalance,
 	})
 }
 
