@@ -69,6 +69,15 @@ type UserWithWallet struct {
 	WalletBalance float64 `json:"walletBalance"`
 }
 
+type UpdateGameRequest struct {
+	GameID      int     `json:"game_id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Price       float64 `json:"price"`
+	TypeID      int     `json:"type_id"`
+	Image       string  `json:"image"`
+}
+
 var db *sql.DB
 
 func main() {
@@ -695,36 +704,102 @@ func addGame(w http.ResponseWriter, r *http.Request) {
 }
 
 // update game
+// ✅ update game (อัปเดตพร้อมส่งข้อมูลเกมกลับ)
 func updateGame(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var g Game
-	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+	var req UpdateGameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// ✅ Debug log
+	fmt.Printf("🛠️ Update game ID=%d | name=%s | type_id=%d\n", req.GameID, req.Name, req.TypeID)
+
+	// ✅ ตรวจสอบว่าเกมนี้มีอยู่จริงไหม
+	var exists int
+	err := db.QueryRow("SELECT COUNT(*) FROM game WHERE game_id = ?", req.GameID).Scan(&exists)
+	if err != nil {
+		http.Error(w, "Database check error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if exists == 0 {
+		http.Error(w, "Game not found", http.StatusNotFound)
+		return
+	}
+
+	// ✅ ถ้า image หรือ name ว่าง → ดึงค่าปัจจุบันมาใช้แทน
+	var current Game
+	err = db.QueryRow(`
+		SELECT name, description, price, image, type_id
+		FROM game WHERE game_id = ?`, req.GameID).
+		Scan(&current.Name, &current.Description, &current.Price, &current.Image, &current.TypeID)
+	if err != nil {
+		http.Error(w, "Fetch current game error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ใช้ค่าปัจจุบันเป็น fallback
+	if req.Name == "" {
+		req.Name = current.Name
+	}
+	if req.Description == "" {
+		req.Description = current.Description
+	}
+	if req.Price == 0 {
+		req.Price = current.Price
+	}
+	if req.Image == "" {
+		req.Image = current.Image
+	}
+	if req.TypeID == 0 {
+		req.TypeID = current.TypeID
+	}
+
+	// ✅ อัปเดตข้อมูล
 	stmt, err := db.Prepare(`
-		UPDATE game SET name=?, description=?, release_date=?, sales=?, price=?, image=?, type_id=?
+		UPDATE game
+		SET name=?, description=?, price=?, image=?, type_id=?, release_date=release_date
 		WHERE game_id=?
 	`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Prepare error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec(g.Name, g.Description, g.ReleaseDate, g.Sales, g.Price, g.Image, g.TypeID, g.GameID)
+	_, err = stmt.Exec(req.Name, req.Description, req.Price, req.Image, req.TypeID, req.GameID)
 	if err != nil {
 		http.Error(w, "Update error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// ✅ ดึงข้อมูลใหม่หลังอัปเดตกลับไป
+	var updated Game
+	query := `
+		SELECT g.game_id, g.name, g.description, g.release_date, g.sales,
+		       g.price, g.image, g.type_id, gt.type_name
+		FROM game g
+		LEFT JOIN game_type gt ON g.type_id = gt.type_id
+		WHERE g.game_id = ?
+	`
+	err = db.QueryRow(query, req.GameID).Scan(
+		&updated.GameID, &updated.Name, &updated.Description, &updated.ReleaseDate,
+		&updated.Sales, &updated.Price, &updated.Image, &updated.TypeID, &updated.TypeName,
+	)
+	if err != nil {
+		http.Error(w, "Fetch updated game error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("✅ Updated game: %+v\n", updated)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"message": "Game updated successfully"})
+	json.NewEncoder(w).Encode(updated)
 }
 
 // delete game
