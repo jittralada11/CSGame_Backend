@@ -59,6 +59,16 @@ type WalletTransaction struct {
 	Username    string  `json:"username,omitempty"` // สำหรับหน้าแอดมิน
 }
 
+type UserWithWallet struct {
+	UID       int     `json:"uid"`
+	Username  string  `json:"username"`
+	Email     string  `json:"email"`
+	Image     string  `json:"image"`
+	Role      string  `json:"role"`
+	CreatedAt string  `json:"created_at"`
+	Balance   float64 `json:"balance"`
+}
+
 var db *sql.DB
 
 func main() {
@@ -92,6 +102,7 @@ func main() {
 	mux.HandleFunc("/wallet/balance", getWalletBalance)
 	mux.HandleFunc("/wallet/purchase", purchaseGame)
 	mux.HandleFunc("/admin/transactions", getAllWalletTransactions) // สำหรับแอดมินดูธุรกรรมทั้งหมด
+	mux.HandleFunc("/users-with-wallet", getUsersWithWallet)
 
 	// Game Routes
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
@@ -952,4 +963,40 @@ func getAllWalletTransactions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transactions)
+}
+
+// ✅ handler ดึง user พร้อมยอดเงิน
+func getUsersWithWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	query := `
+		SELECT u.uid, u.username, u.email, IFNULL(u.image, ''), u.role, u.created_at,
+		       IFNULL(w.balance, 0)
+		FROM user u
+		LEFT JOIN wallet w ON u.uid = w.uid
+		ORDER BY u.uid ASC;
+	`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var users []UserWithWallet
+	for rows.Next() {
+		var u UserWithWallet
+		if err := rows.Scan(&u.UID, &u.Username, &u.Email, &u.Image, &u.Role, &u.CreatedAt, &u.Balance); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		users = append(users, u)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
 }
