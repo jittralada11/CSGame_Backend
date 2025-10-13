@@ -39,7 +39,6 @@ type Game struct {
 	Image       string  `json:"image"`
 	TypeID      int     `json:"type_id"`
 	TypeName    string  `json:"type_name,omitempty"`
-	SalesRank   int     `json:"salesRank"`
 }
 
 // โครงสร้างข้อมูล Wallet และ Transaction
@@ -510,9 +509,8 @@ func getGames(w http.ResponseWriter, r *http.Request) {
 	       g.type_id, gt.type_name
 	FROM game g
 	LEFT JOIN game_type gt ON g.type_id = gt.type_id
-	ORDER BY g.sales DESC;  -- ✅ เรียงตามยอดขายแทน game_id
+	ORDER BY g.game_id DESC;
 	`
-
 	rows, err := db.Query(query)
 	if err != nil {
 		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
@@ -521,18 +519,13 @@ func getGames(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var games []Game
-	rank := 1
 	for rows.Next() {
 		var g Game
-		if err := rows.Scan(
-			&g.GameID, &g.Name, &g.Description, &g.ReleaseDate,
-			&g.Sales, &g.Price, &g.Image, &g.TypeID, &g.TypeName,
-		); err != nil {
+		if err := rows.Scan(&g.GameID, &g.Name, &g.Description, &g.ReleaseDate,
+			&g.Sales, &g.Price, &g.Image, &g.TypeID, &g.TypeName); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		g.SalesRank = rank // ✅ ใส่ลำดับขายดี
-		rank++
 		games = append(games, g)
 	}
 
@@ -643,7 +636,6 @@ func getTopSellingGames(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var games []Game
-	rank := 1
 	for rows.Next() {
 		var g Game
 		if err := rows.Scan(
@@ -653,8 +645,6 @@ func getTopSellingGames(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		g.SalesRank = rank // ✅ ใส่ลำดับขายดี
-		rank++
 		games = append(games, g)
 	}
 
