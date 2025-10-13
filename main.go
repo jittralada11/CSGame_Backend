@@ -598,30 +598,24 @@ func getGameTypes(w http.ResponseWriter, r *http.Request) {
 }
 
 // ✅ Handler ดึง 5 เกมขายดีที่สุด
-// ✅ Handler ดึง Top N เกมขายดีที่สุด
+// ✅ Handler: ดึง Top N เกมขายดีที่สุด พร้อมนับ rank จากยอดขาย
 func getTopSellingGames(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 🔹 อ่าน limit จาก query string เช่น /games/top-sales?limit=5
+	// อ่าน limit จาก query เช่น /games/top-sales?limit=5
 	limit := 5
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
 
+	// ✅ ดึงเกมจาก DB เรียงตามยอดขายมากไปน้อย
 	query := `
 		SELECT 
-			g.game_id, 
-			g.name, 
-			g.description, 
-			g.release_date, 
-			g.sales, 
-			g.price, 
-			g.image,
-			g.type_id,
-			gt.type_name
+			g.game_id, g.name, g.description, g.release_date,
+			g.sales, g.price, g.image, g.type_id, gt.type_name
 		FROM game g
 		LEFT JOIN game_type gt ON g.type_id = gt.type_id
 		ORDER BY g.sales DESC
@@ -635,28 +629,39 @@ func getTopSellingGames(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var games []Game
+	// ✅ เตรียม slice สำหรับเก็บผลลัพธ์
+	var games []map[string]interface{}
+
+	// ✅ ตัวแปรเก็บลำดับ rank เริ่มที่ 1
+	rank := 1
+
 	for rows.Next() {
 		var g Game
-		if err := rows.Scan(
-			&g.GameID, &g.Name, &g.Description, &g.ReleaseDate,
-			&g.Sales, &g.Price, &g.Image, &g.TypeID, &g.TypeName,
-		); err != nil {
-			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+		if err := rows.Scan(&g.GameID, &g.Name, &g.Description, &g.ReleaseDate,
+			&g.Sales, &g.Price, &g.Image, &g.TypeID, &g.TypeName); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		games = append(games, g)
+
+		// ✅ เพิ่มข้อมูล rank ตามยอดขาย
+		games = append(games, map[string]interface{}{
+			"game_id":      g.GameID,
+			"name":         g.Name,
+			"description":  g.Description,
+			"release_date": g.ReleaseDate,
+			"sales":        g.Sales,
+			"price":        g.Price,
+			"image":        g.Image,
+			"type_id":      g.TypeID,
+			"type_name":    g.TypeName,
+			"salesRank":    rank, // ← นับลำดับจากยอดขาย
+		})
+
+		rank++ // เพิ่มลำดับทีละ 1 ทุกเกม
 	}
 
-	// 🔹 ตรวจสอบกรณีไม่มีข้อมูล
-	if len(games) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[]`))
-		return
-	}
-
+	// ✅ ส่งข้อมูลกลับในรูปแบบ JSON
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(games)
 }
 
