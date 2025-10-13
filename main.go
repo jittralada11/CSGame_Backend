@@ -106,6 +106,7 @@ func main() {
 
 	// Game Routes
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
+	mux.HandleFunc("/game-types", getGameTypes) // ดึงประเภทเกมทั้งหมด
 	mux.HandleFunc("/game/", getGameByID)       // ดึงเกมตาม id
 	mux.HandleFunc("/game/add", addGame)        // เพิ่มเกมใหม่
 	mux.HandleFunc("/game/update", updateGame)  // แก้ไขข้อมูลเกม
@@ -510,6 +511,39 @@ func getGameByID(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(g)
+}
+
+// game type
+// ✅ Handler ดึงประเภทเกมทั้งหมด
+func getGameTypes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := db.Query("SELECT type_id, type_name FROM game_type")
+	if err != nil {
+		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var types []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		types = append(types, map[string]interface{}{
+			"id":   id,
+			"name": name,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(types)
 }
 
 // add game
