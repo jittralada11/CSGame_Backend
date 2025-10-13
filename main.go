@@ -112,6 +112,7 @@ func main() {
 	mux.HandleFunc("/game/update", updateGame)  // แก้ไขข้อมูลเกม
 	mux.HandleFunc("/game/delete/", deleteGame) // ลบเกม
 	mux.HandleFunc("/user/games", getUserGames)
+	mux.HandleFunc("/games/top-sales", getTopSellingGames)
 
 	// ✅ Serve static files (รูป)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
@@ -546,6 +547,50 @@ func getGameTypes(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(types)
 }
 
+// ✅ Handler ดึง 5 เกมขายดีที่สุด
+func getTopSellingGames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// ดึงจำนวน limit จาก query เช่น /games/top-sales?limit=10
+	limit := 5
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	query := `
+		SELECT g.game_id, g.name, g.description, g.release_date, 
+		       g.sales, g.price, g.image, g.type_id, gt.type_name
+		FROM game g
+		LEFT JOIN game_type gt ON g.type_id = gt.type_id
+		ORDER BY g.sales DESC
+		LIMIT ?;
+	`
+
+	rows, err := db.Query(query, limit)
+	if err != nil {
+		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var games []Game
+	for rows.Next() {
+		var g Game
+		if err := rows.Scan(&g.GameID, &g.Name, &g.Description, &g.ReleaseDate,
+			&g.Sales, &g.Price, &g.Image, &g.TypeID, &g.TypeName); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		games = append(games, g)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(games)
+}
+
 // add game
 func addGame(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -821,7 +866,6 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ รับข้อมูลจาก frontend
 	var req struct {
 		UID         int     `json:"uid"`
 		GameID      int     `json:"game_id"`
@@ -829,43 +873,39 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		Description string  `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ ตรวจสอบความถูกต้องของข้อมูล
 	if req.Amount <= 0 {
 		http.Error(w, "Invalid purchase amount", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ เริ่ม Transaction พร้อม Isolation สูงสุด
+	// ✅ เริ่ม Transaction ด้วยระดับ Isolation สูงสุด (Serializable)
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{
-		Isolation: sql.LevelSerializable, // ป้องกันการอ่าน/เขียนซ้อน
+		Isolation: sql.LevelSerializable,
 	})
 	if err != nil {
 		http.Error(w, "Transaction start error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้แล้วหรือยัง
-	var alreadyOwned int
-	err = tx.QueryRow(
-		"SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ?",
-		req.UID, req.GameID,
-	).Scan(&alreadyOwned)
+	// ✅ ตรวจสอบว่า user เคยซื้อเกมนี้หรือยัง (ล็อกข้อมูล ownership ด้วย)
+	var exists int
+	err = tx.QueryRow("SELECT COUNT(*) FROM user_game WHERE uid = ? AND game_id = ? FOR UPDATE", req.UID, req.GameID).Scan(&exists)
 	if err != nil {
 		tx.Rollback()
 		http.Error(w, "Check ownership error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if alreadyOwned > 0 {
+	if exists > 0 {
 		tx.Rollback()
 		http.Error(w, "You already own this game", http.StatusBadRequest)
 		return
 	}
 
-	// ✅ ดึง wallet_id และยอดเงิน พร้อมล็อกแถวไว้ระหว่าง transaction
+	// ✅ ล็อกข้อมูล wallet เพื่อป้องกันการซื้อพร้อมกัน
 	var walletID int
 	var balance float64
 	err = tx.QueryRow("SELECT wallet_id, balance FROM wallet WHERE uid = ? FOR UPDATE", req.UID).Scan(&walletID, &balance)
@@ -875,11 +915,11 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		tx.Rollback()
-		http.Error(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Wallet query error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตรวจสอบยอดเงินเพียงพอหรือไม่
+	// ✅ ตรวจสอบยอดเงิน
 	if balance < req.Amount {
 		tx.Rollback()
 		http.Error(w, "Insufficient balance", http.StatusBadRequest)
@@ -890,11 +930,11 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec("UPDATE wallet SET balance = balance - ? WHERE wallet_id = ?", req.Amount, walletID)
 	if err != nil {
 		tx.Rollback()
-		http.Error(w, "Update wallet error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Wallet update error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ บันทึกธุรกรรมลง wallet_transaction
+	// ✅ บันทึกธุรกรรม (wallet_transaction)
 	_, err = tx.Exec(`
 		INSERT INTO wallet_transaction (wallet_id, amount, trans_type, description)
 		VALUES (?, ?, 'purchase', ?)`,
@@ -905,7 +945,7 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ บันทึกว่า user ซื้อเกมนี้แล้ว
+	// ✅ บันทึกการเป็นเจ้าของเกม
 	_, err = tx.Exec("INSERT INTO user_game (uid, game_id) VALUES (?, ?)", req.UID, req.GameID)
 	if err != nil {
 		tx.Rollback()
@@ -913,34 +953,51 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ ดึงยอดเงินล่าสุดหลังจากอัปเดต (ตรวจสอบ double-spend)
-	var newBalance float64
-	err = tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ? FOR UPDATE", walletID).Scan(&newBalance)
-	if err != nil {
+	// ✅ ล็อกข้อมูลเกมก่อนอัปเดตยอดขาย
+	var currentSales int
+	err = tx.QueryRow("SELECT sales FROM game WHERE game_id = ? FOR UPDATE", req.GameID).Scan(&currentSales)
+	if err == sql.ErrNoRows {
 		tx.Rollback()
-		http.Error(w, "Balance recheck failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Game not found", http.StatusNotFound)
 		return
-	}
-	if newBalance < 0 {
+	} else if err != nil {
 		tx.Rollback()
-		http.Error(w, "Concurrent transaction conflict detected", http.StatusConflict)
+		http.Error(w, "Query game sales error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ บันทึกการเปลี่ยนแปลงลงฐานข้อมูล
+	// ✅ เพิ่มยอดขายแบบปลอดภัย
+	newSales := currentSales + 1
+	_, err = tx.Exec("UPDATE game SET sales = ? WHERE game_id = ?", newSales, req.GameID)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Update game sales error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ดึงยอดคงเหลือใหม่หลังจากซื้อสำเร็จ
+	var newBalance float64
+	err = tx.QueryRow("SELECT balance FROM wallet WHERE wallet_id = ?", walletID).Scan(&newBalance)
+	if err != nil {
+		tx.Rollback()
+		http.Error(w, "Balance recheck error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ Commit Transaction ทั้งหมด
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "Commit error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// ✅ ตอบกลับผลลัพธ์
+	// ✅ ตอบกลับข้อมูล
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":  "Purchase successful",
-		"uid":      req.UID,
-		"game_id":  req.GameID,
-		"balance":  newBalance,
-		"deducted": req.Amount,
+		"message":   "Purchase successful",
+		"uid":       req.UID,
+		"game_id":   req.GameID,
+		"balance":   newBalance,
+		"new_sales": newSales,
 	})
 }
 
