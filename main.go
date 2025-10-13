@@ -600,16 +600,18 @@ func addGame(w http.ResponseWriter, r *http.Request) {
 
 	var g Game
 	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	fmt.Printf("🎮 เพิ่มเกมใหม่: %+v\n", g)
 
 	stmt, err := db.Prepare(`
 		INSERT INTO game (name, description, release_date, sales, price, image, type_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Prepare statement error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer stmt.Close()
@@ -620,12 +622,35 @@ func addGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, _ := res.LastInsertId()
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		http.Error(w, "Cannot get last insert ID: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// ✅ ดึงข้อมูลเกมที่เพิ่งเพิ่มจาก DB กลับมา
+	var newGame Game
+	query := `
+		SELECT g.game_id, g.name, g.description, g.release_date, g.sales,
+		       g.price, g.image, g.type_id, gt.type_name
+		FROM game g
+		LEFT JOIN game_type gt ON g.type_id = gt.type_id
+		WHERE g.game_id = ?
+	`
+	err = db.QueryRow(query, lastID).Scan(
+		&newGame.GameID, &newGame.Name, &newGame.Description,
+		&newGame.ReleaseDate, &newGame.Sales, &newGame.Price,
+		&newGame.Image, &newGame.TypeID, &newGame.TypeName,
+	)
+	if err != nil {
+		http.Error(w, "Fetch new game error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("✅ เพิ่มเกมสำเร็จ ID=%d ชื่อ=%s\n", newGame.GameID, newGame.Name)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Game added successfully",
-		"game_id": id,
-	})
+	json.NewEncoder(w).Encode(newGame)
 }
 
 // update game
