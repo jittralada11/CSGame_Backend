@@ -91,6 +91,7 @@ func main() {
 	mux.HandleFunc("/wallet/transactions", getWalletTransactions)
 	mux.HandleFunc("/wallet/balance", getWalletBalance)
 	mux.HandleFunc("/wallet/purchase", purchaseGame)
+	mux.HandleFunc("/admin/transactions", getAllWalletTransactions) // สำหรับแอดมินดูธุรกรรมทั้งหมด
 
 	// Game Routes
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
@@ -895,4 +896,60 @@ func getUserGames(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(games)
+}
+
+// ✅ handler สำหรับแอดมิน ดูธุรกรรมทั้งหมดของทุกผู้ใช้
+func getAllWalletTransactions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// สามารถกรองตาม uid ได้ เช่น /admin/transactions?uid=5
+	uid := r.URL.Query().Get("uid")
+
+	query := `
+		SELECT wt.trans_id, u.username, wt.amount, wt.trans_type, wt.description, wt.created_at
+		FROM wallet_transaction wt
+		JOIN wallet w ON wt.wallet_id = w.wallet_id
+		JOIN user u ON w.uid = u.uid
+	`
+	var rows *sql.Rows
+	var err error
+
+	if uid != "" {
+		query += " WHERE u.uid = ? ORDER BY wt.created_at DESC"
+		rows, err = db.Query(query, uid)
+	} else {
+		query += " ORDER BY wt.created_at DESC"
+		rows, err = db.Query(query)
+	}
+
+	if err != nil {
+		http.Error(w, "Database query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type AdminTransaction struct {
+		TransID     int     `json:"trans_id"`
+		Username    string  `json:"username"`
+		Amount      float64 `json:"amount"`
+		Type        string  `json:"type"`
+		Description string  `json:"description"`
+		CreatedAt   string  `json:"created_at"`
+	}
+
+	var transactions []AdminTransaction
+	for rows.Next() {
+		var t AdminTransaction
+		if err := rows.Scan(&t.TransID, &t.Username, &t.Amount, &t.Type, &t.Description, &t.CreatedAt); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		transactions = append(transactions, t)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(transactions)
 }
