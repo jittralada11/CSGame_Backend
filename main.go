@@ -92,13 +92,13 @@ func main() {
 	mux.HandleFunc("/wallet/balance", getWalletBalance)
 	mux.HandleFunc("/wallet/purchase", purchaseGame)
 
-	// game
 	// Game Routes
 	mux.HandleFunc("/games", getGames)          // ดึงเกมทั้งหมด
 	mux.HandleFunc("/game/", getGameByID)       // ดึงเกมตาม id
 	mux.HandleFunc("/game/add", addGame)        // เพิ่มเกมใหม่
 	mux.HandleFunc("/game/update", updateGame)  // แก้ไขข้อมูลเกม
 	mux.HandleFunc("/game/delete/", deleteGame) // ลบเกม
+	mux.HandleFunc("/user/games", getUserGames)
 
 	// ✅ Serve static files (รูป)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
@@ -855,4 +855,44 @@ func purchaseGame(w http.ResponseWriter, r *http.Request) {
 		"game_id": req.GameID,
 		"balance": newBalance,
 	})
+}
+
+// ✅ handler ดึงเกมที่ user เคยซื้อ
+func getUserGames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		http.Error(w, "Missing uid", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		SELECT g.game_id, g.name, g.image, g.price
+		FROM user_game ug
+		JOIN game g ON ug.game_id = g.game_id
+		WHERE ug.uid = ?
+	`
+	rows, err := db.Query(query, uid)
+	if err != nil {
+		http.Error(w, "Query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var games []Game
+	for rows.Next() {
+		var g Game
+		if err := rows.Scan(&g.GameID, &g.Name, &g.Image, &g.Price); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		games = append(games, g)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(games)
 }
