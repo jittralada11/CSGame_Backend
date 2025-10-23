@@ -1454,3 +1454,52 @@ func deletePromotion(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]string{"message": "Promotion deleted successfully"})
 }
+
+// ✅ POST /promotions/validate
+func ValidatePromotion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	var promo Promotion
+	err := db.QueryRow(`
+		SELECT code, discount_value, type, usage_limit, used_count, is_active, expiry_date
+		FROM promotions WHERE code = ?`, req.Code,
+	).Scan(&promo.Code, &promo.Discount, &promo.Type, &promo.UsageLimit,
+		&promo.UsedCount, &promo.IsActive, &promo.ExpiryDate)
+
+	if err != nil {
+		http.Error(w, `{"valid":false,"message":"ไม่พบรหัสส่วนลดนี้"}`, 400)
+		return
+	}
+
+	// ✅ แปลง expiry_date เป็น time.Time ก่อนเปรียบเทียบ
+	expiryTime, err := time.Parse("2006-01-02", promo.ExpiryDate)
+	if err != nil {
+		http.Error(w, `{"valid":false,"message":"รูปแบบวันที่ไม่ถูกต้อง"}`, 400)
+		return
+	}
+
+	// ✅ ตรวจสอบวันหมดอายุและสถานะ
+	if time.Now().After(expiryTime) || !promo.IsActive {
+		http.Error(w, `{"valid":false,"message":"รหัสหมดอายุหรือไม่สามารถใช้ได้"}`, 400)
+		return
+	}
+
+	// ✅ ส่งข้อมูลกลับไปให้ frontend
+	response := map[string]interface{}{
+		"valid":    true,
+		"discount": promo.Discount,
+		"message":  "รหัสส่วนลดใช้งานได้",
+		"promo":    promo,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
