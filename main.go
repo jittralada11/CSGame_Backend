@@ -78,6 +78,22 @@ type UpdateGameRequest struct {
 	Image       string  `json:"image"`
 }
 
+// โครงสร้างข้อมูล Promotion
+type Promotion struct {
+	PromoID     int     `json:"promo_id"`
+	Code        string  `json:"code"`
+	Description string  `json:"description"`
+	Type        string  `json:"type"` // "percent" หรือ "amount"
+	Discount    float64 `json:"discount_value"`
+	UsageLimit  int     `json:"usage_limit"`
+	UsedCount   int     `json:"used_count"`
+	StartDate   string  `json:"start_date"`
+	ExpiryDate  string  `json:"expiry_date"`
+	IsActive    bool    `json:"is_active"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+}
+
 var db *sql.DB
 
 func main() {
@@ -123,6 +139,12 @@ func main() {
 	mux.HandleFunc("/game/update", updateGame)  // แก้ไขข้อมูลเกม
 	mux.HandleFunc("/game/delete/", deleteGame) // ลบเกม
 	mux.HandleFunc("/games/top-sales", getTopSellingGames)
+
+	// Promotion Routes (จัดการโค้ดส่วนลด)
+	mux.HandleFunc("/promotions", getPromotions)           // ดึงโปรโมชั่นทั้งหมด
+	mux.HandleFunc("/promotions/add", addPromotion)        // เพิ่มโปรโมชั่นใหม่
+	mux.HandleFunc("/promotions/update", updatePromotion)  // แก้ไขโปรโมชั่น
+	mux.HandleFunc("/promotions/delete/", deletePromotion) // ลบโปรโมชั่น
 
 	// ✅ Serve static files (รูป)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
@@ -946,7 +968,6 @@ func topUpWallet(w http.ResponseWriter, r *http.Request) {
 
 // ✅ handler สำหรับแอดมิน ดูประวัติการเติมเงินทั้งหมด
 // ✅ ดึงประวัติการทำรายการทั้งหมดของ user
-// ✅ handler ดึงประวัติการทำรายการของ user
 func getWalletTransactions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1309,4 +1330,127 @@ func getUsersWithWallet(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
+}
+
+// ✅ ดึงโปรโมชั่นทั้งหมด
+func getPromotions(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT promo_id, code, description, type, discount_value, usage_limit, used_count, start_date, expiry_date, is_active, created_at, updated_at FROM promotions ORDER BY promo_id DESC")
+	if err != nil {
+		http.Error(w, "Database query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var promotions []Promotion
+	for rows.Next() {
+		var p Promotion
+		if err := rows.Scan(&p.PromoID, &p.Code, &p.Description, &p.Type, &p.Discount,
+			&p.UsageLimit, &p.UsedCount, &p.StartDate, &p.ExpiryDate, &p.IsActive, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			http.Error(w, "Scan error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		promotions = append(promotions, p)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(promotions)
+}
+
+// ✅ เพิ่มโปรโมชั่นใหม่
+func addPromotion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var p Promotion
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var exists int
+	err := db.QueryRow("SELECT COUNT(*) FROM promotions WHERE code = ?", p.Code).Scan(&exists)
+	if err != nil {
+		http.Error(w, "Check code error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if exists > 0 {
+		http.Error(w, "Promotion code already exists", http.StatusBadRequest)
+		return
+	}
+
+	stmt, err := db.Prepare(`
+		INSERT INTO promotions (code, description, type, discount_value, usage_limit, used_count, start_date, expiry_date, is_active)
+		VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+	`)
+	if err != nil {
+		http.Error(w, "Prepare error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(p.Code, p.Description, p.Type, p.Discount, p.UsageLimit, p.StartDate, p.ExpiryDate, p.IsActive)
+	if err != nil {
+		http.Error(w, "Insert error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Promotion added successfully"})
+}
+
+// ✅ อัปเดตโปรโมชั่น
+func updatePromotion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var p Promotion
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stmt, err := db.Prepare(`
+		UPDATE promotions 
+		SET code=?, description=?, type=?, discount_value=?, usage_limit=?, start_date=?, expiry_date=?, is_active=? 
+		WHERE promo_id=?
+	`)
+	if err != nil {
+		http.Error(w, "Prepare error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(p.Code, p.Description, p.Type, p.Discount, p.UsageLimit, p.StartDate, p.ExpiryDate, p.IsActive, p.PromoID)
+	if err != nil {
+		http.Error(w, "Update error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"message": "Promotion updated successfully"})
+}
+
+// ✅ ลบโปรโมชั่น
+func deletePromotion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := r.URL.Path[len("/promotions/delete/"):]
+	if id == "" {
+		http.Error(w, "Missing promotion ID", http.StatusBadRequest)
+		return
+	}
+
+	_, err := db.Exec("DELETE FROM promotions WHERE promo_id = ?", id)
+	if err != nil {
+		http.Error(w, "Delete error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"message": "Promotion deleted successfully"})
 }
