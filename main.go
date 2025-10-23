@@ -1464,15 +1464,19 @@ func ValidatePromotion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Code string `json:"code"`
+		Code   string `json:"code"`
+		UserID int    `json:"user_id"` // ✅ เพิ่ม user_id มาจาก frontend
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"valid":false,"message":"Invalid request"}`, 400)
+		return
+	}
 
 	var promo Promotion
 	err := db.QueryRow(`
-		SELECT code, discount_value, type, usage_limit, used_count, is_active, expiry_date
+		SELECT promo_id, code, discount_value, type, usage_limit, used_count, is_active, expiry_date
 		FROM promotions WHERE code = ?`, req.Code,
-	).Scan(&promo.Code, &promo.Discount, &promo.Type, &promo.UsageLimit,
+	).Scan(&promo.PromoID, &promo.Code, &promo.Discount, &promo.Type, &promo.UsageLimit,
 		&promo.UsedCount, &promo.IsActive, &promo.ExpiryDate)
 
 	if err != nil {
@@ -1480,8 +1484,8 @@ func ValidatePromotion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ แปลง expiry_date จาก string → time.Time (ตรงกับ MySQL)
-	expiryTime, err := time.Parse("2006-01-02 15:04:05", promo.ExpiryDate)
+	// ✅ แปลงวันที่จาก DATE → Time
+	expiryTime, err := time.Parse("2006-01-02", promo.ExpiryDate)
 	if err != nil {
 		http.Error(w, `{"valid":false,"message":"รูปแบบวันที่ไม่ถูกต้อง"}`, 400)
 		return
@@ -1493,7 +1497,27 @@ func ValidatePromotion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ ส่งข้อมูลกลับไปให้ frontend
+	// ✅ ตรวจสอบจำนวนการใช้
+	if promo.UsedCount >= promo.UsageLimit {
+		http.Error(w, `{"valid":false,"message":"รหัสนี้ถูกใช้ถึงขีดจำกัดแล้ว"}`, 400)
+		return
+	}
+
+	// ✅ บันทึกว่าผู้ใช้คนนี้ใช้โค้ดนี้
+	_, err = db.Exec(`
+		INSERT INTO promotion_usage (promo_id, user_id)
+		VALUES (?, ?)`,
+		promo.PromoID, req.UserID,
+	)
+	if err != nil {
+		http.Error(w, `{"valid":false,"message":"ไม่สามารถบันทึกการใช้โค้ดได้"}`, 500)
+		return
+	}
+
+	// ✅ เพิ่มจำนวน used_count
+	_, _ = db.Exec(`UPDATE promotions SET used_count = used_count + 1 WHERE promo_id = ?`, promo.PromoID)
+
+	// ✅ ส่งข้อมูลกลับ
 	response := map[string]interface{}{
 		"valid":    true,
 		"discount": promo.Discount,
