@@ -145,6 +145,7 @@ func main() {
 	mux.HandleFunc("/promotions/add", addPromotion)        // เพิ่มโปรโมชั่นใหม่
 	mux.HandleFunc("/promotions/update", updatePromotion)  // แก้ไขโปรโมชั่น
 	mux.HandleFunc("/promotions/delete/", deletePromotion) // ลบโปรโมชั่น
+	mux.HandleFunc("/promotions/validate", ValidatePromotion)
 
 	// ✅ Serve static files (รูป)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
@@ -1479,8 +1480,8 @@ func ValidatePromotion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ✅ แปลง expiry_date เป็น time.Time ก่อนเปรียบเทียบ
-	expiryTime, err := time.Parse("2006-01-02", promo.ExpiryDate)
+	// ✅ แปลง expiry_date จาก string → time.Time (ตรงกับ MySQL)
+	expiryTime, err := time.Parse("2006-01-02 15:04:05", promo.ExpiryDate)
 	if err != nil {
 		http.Error(w, `{"valid":false,"message":"รูปแบบวันที่ไม่ถูกต้อง"}`, 400)
 		return
