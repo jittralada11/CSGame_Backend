@@ -946,6 +946,7 @@ func topUpWallet(w http.ResponseWriter, r *http.Request) {
 
 // ✅ handler สำหรับแอดมิน ดูประวัติการเติมเงินทั้งหมด
 // ✅ ดึงประวัติการทำรายการทั้งหมดของ user
+// ✅ handler ดึงประวัติการทำรายการของ user
 func getWalletTransactions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -989,6 +990,13 @@ func getWalletTransactions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		transactions = append(transactions, t)
+	}
+
+	// ✅ ถ้าไม่มีข้อมูลเลย ให้ส่ง array ว่าง [] แทน null
+	if len(transactions) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Transaction{}) // ส่ง array ว่าง
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
